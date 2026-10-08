@@ -45,6 +45,35 @@ use super::tool_log_payload;
 struct ExtensionEchoContributor;
 
 #[test]
+fn plaintext_collaboration_messages_support_non_reserved_namespace() {
+    for namespace in ["collaboration", "agents_plaintext"] {
+        for name in ["spawn_agent", "send_message", "followup_task"] {
+            for encrypted_function_args in [None, Some(Vec::new())] {
+                let call = ToolCall {
+                    tool_name: ToolName::namespaced(namespace, name),
+                    call_id: "call-plaintext".to_string(),
+                    payload: ToolPayload::Function {
+                        arguments: json!({"message": "Inspect the protocol"}).to_string(),
+                    },
+                    encrypted_function_args,
+                };
+                assert_eq!(call.direct_source(), ToolCallSource::DirectPlaintextMessage);
+            }
+        }
+    }
+
+    let encrypted_call = ToolCall {
+        tool_name: ToolName::namespaced("agents_plaintext", "send_message"),
+        call_id: "call-encrypted".to_string(),
+        payload: ToolPayload::Function {
+            arguments: json!({"message": "ciphertext"}).to_string(),
+        },
+        encrypted_function_args: Some(vec!["message".to_string()]),
+    };
+    assert_eq!(encrypted_call.direct_source(), ToolCallSource::Direct);
+}
+
+#[test]
 fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
     let payload = ToolPayload::Function {
         arguments: json!({"target": "/root/worker", "message": "secret message"}).to_string(),

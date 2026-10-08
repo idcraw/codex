@@ -1,0 +1,114 @@
+name: Plaintext Codex Linux release
+
+on:
+  push:
+    branches:
+      - plaintext-v0.161.0
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plaintext-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    env:
+      TARGET: x86_64-unknown-linux-musl
+      CODEX_REPO_ROOT: ${{ github.workspace }}
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      AWS_LC_SYS_NO_JITTER_ENTROPY: "1"
+      AWS_LC_SYS_NO_JITTER_ENTROPY_x86_64_unknown_linux_musl: "1"
+    defaults:
+      run:
+        shell: bash
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          df -h .
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
+        with:
+          tool: just,cargo-nextest
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.14.0
+          use-cache: false
+      - name: Install upstream musl build tools
+        run: bash ../.github/scripts/install-musl-build-tools.sh
+      - uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-musl
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Build bundled sandbox helper
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target "$TARGET" --bin bwrap
+          strip --strip-debug --strip-unneeded "target/$TARGET/release/bwrap"
+          digest="$(sha256sum "target/$TARGET/release/bwrap" | cut -d ' ' -f 1)"
+          echo "CODEX_BWRAP_SHA256=$digest" >> "$GITHUB_ENV"
+      - name: Build patched CLI and code-mode host
+        run: |
+          set -euo pipefail
+          export STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
+          cargo build --locked --release --target "$TARGET" \
+            --bin codex --bin codex-code-mode-host
+      - name: Test plaintext schemas and routing
+        run: |
+          just test --locked --release --target "$TARGET" -p codex-core --lib \
+            -E 'test(plaintext_collaboration_messages_support_non_reserved_namespace) | test(multi_agent_v2_message_schemas_are_plaintext) | test(multi_agent_v2_can_use_configured_tool_namespace) | test(spawn_agent_tool_v2_requires_task_name) | test(send_message_tool_requires_message_and_has_no_output_schema) | test(followup_task_tool_requires_message_and_has_no_output_schema) | test(build_tool_call_uses_namespace_for_registry_name)'
+      - name: Package and smoke-test binaries
+        run: |
+          set -euo pipefail
+          mkdir -p ../dist/package
+          for binary in codex codex-code-mode-host bwrap; do
+            cp "target/$TARGET/release/$binary" "../dist/package/$binary"
+            strip --strip-debug --strip-unneeded "../dist/package/$binary"
+          done
+          ../dist/package/codex --version
+          ../dist/package/codex --help > /dev/null
+          tar -C ../dist/package -czf ../dist/codex-0.161.0-plaintext-x86_64-unknown-linux-musl.tar.gz .
+          cd ../dist
+          sha256sum codex-0.161.0-plaintext-x86_64-unknown-linux-musl.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: codex-0.161.0-plaintext-x86_64-unknown-linux-musl
+          path: |
+            dist/codex-0.161.0-plaintext-x86_64-unknown-linux-musl.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+      - name: Publish fork release
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=plaintext-v0.161.0
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" \
+              dist/codex-0.161.0-plaintext-x86_64-unknown-linux-musl.tar.gz dist/SHA256SUMS --clobber
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title 'Codex 0.161.0 — plaintext collaboration (Linux x86-64)' \
+              --notes 'Codex 0.161.0 with plaintext collaboration messages.' \
+              dist/codex-0.161.0-plaintext-x86_64-unknown-linux-musl.tar.gz dist/SHA256SUMS
+          fi
