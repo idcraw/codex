@@ -3,6 +3,7 @@ name: Plaintext Codex Linux release
 on:
   push:
     branches:
+      - main
       - plaintext-v0.161.0
   workflow_dispatch:
 
@@ -68,7 +69,8 @@ jobs:
       - name: Build patched CLI and code-mode host
         run: |
           set -euo pipefail
-          export STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
+          STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
+          export STABLE_GIT_COMMIT
           cargo build --locked --release --target "$TARGET" \
             --bin codex --bin codex-code-mode-host
       - name: Test plaintext schemas and routing
@@ -78,6 +80,10 @@ jobs:
       - name: Package and smoke-test binaries
         run: |
           set -euo pipefail
+          release_tag="plaintext-main-${GITHUB_SHA:0:12}"
+          archive="codex-${release_tag}-$TARGET.tar.gz"
+          echo "FORK_RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+          echo "FORK_ARCHIVE=$archive" >> "$GITHUB_ENV"
           mkdir -p ../dist/package
           for binary in codex codex-code-mode-host bwrap; do
             cp "target/$TARGET/release/$binary" "../dist/package/$binary"
@@ -85,14 +91,14 @@ jobs:
           done
           ../dist/package/codex --version
           ../dist/package/codex --help > /dev/null
-          tar -C ../dist/package -czf ../dist/codex-0.161.0-plaintext-x86_64-unknown-linux-musl.tar.gz .
+          tar -C ../dist/package -czf "../dist/$archive" .
           cd ../dist
-          sha256sum codex-0.161.0-plaintext-x86_64-unknown-linux-musl.tar.gz > SHA256SUMS
+          sha256sum "$archive" > SHA256SUMS
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
-          name: codex-0.161.0-plaintext-x86_64-unknown-linux-musl
+          name: codex-${{ env.FORK_RELEASE_TAG }}-x86_64-unknown-linux-musl
           path: |
-            dist/codex-0.161.0-plaintext-x86_64-unknown-linux-musl.tar.gz
+            dist/codex-*.tar.gz
             dist/SHA256SUMS
           if-no-files-found: error
       - name: Publish fork release
@@ -101,14 +107,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag=plaintext-v0.161.0
+          tag="$FORK_RELEASE_TAG"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release upload "$tag" --repo "$GITHUB_REPOSITORY" \
-              dist/codex-0.161.0-plaintext-x86_64-unknown-linux-musl.tar.gz dist/SHA256SUMS --clobber
+              "dist/$FORK_ARCHIVE" dist/SHA256SUMS --clobber
           else
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" --prerelease --latest=false \
-              --title 'Codex 0.161.0 — plaintext collaboration (Linux x86-64)' \
-              --notes 'Codex 0.161.0 with plaintext collaboration messages.' \
-              dist/codex-0.161.0-plaintext-x86_64-unknown-linux-musl.tar.gz dist/SHA256SUMS
+              --title "Codex main ${GITHUB_SHA:0:12} — plaintext collaboration (Linux x86-64)" \
+              --notes "Upstream main with plaintext collaboration messages. Fork commit: $GITHUB_SHA." \
+              "dist/$FORK_ARCHIVE" dist/SHA256SUMS
           fi
